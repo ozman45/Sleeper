@@ -406,6 +406,125 @@ def get_playoff_bracket() -> dict:
     return {"winners_bracket": bracket}
 
 
+def _current_draft() -> dict:
+    """Find this league's draft object (id, status, settings, slot mapping)."""
+    drafts = _get(f"/league/{LEAGUE_ID}/drafts", ttl=30)
+    if not drafts:
+        raise ValueError("No draft found for this league yet.")
+    return drafts[0]
+
+
+@mcp.tool
+def get_draft_status() -> dict:
+    """Live draft tracker. Use this DURING your draft, right before your pick.
+    Shows: whose turn it is, all picks made so far, your picks and remaining
+    roster needs by position, and the best available players at each
+    position you still need — ranked by trending-add popularity as a proxy
+    for consensus value since live ADP isn't available via this connector."""
+    draft = _current_draft()
+    draft_id = draft["draft_id"]
+    settings = draft.get("settings") or {}
+    slot_to_roster = {int(k): v for k, v in (draft.get("slot_to_roster_id") or {}).items()}
+    total_teams = settings.get("teams") or len(slot_to_roster) or 12
+
+    users = _league_users()
+    roster_owner = {r["roster_id"]: r.get("owner_id") for r in _rosters()}
+
+    def team_of(rid):
+        return users.get(roster_owner.get(rid), {}).get("team_name", f"roster {rid}")
+
+    picks = _get(f"/draft/{draft_id}/picks", ttl=15) or []
+    players = _players()
+
+    # Whose turn is it (snake draft aware)
+    pick_no = len(picks) + 1
+    rnd = (pick_no - 1) // total_teams + 1
+    pos_in_round = (pick_no - 1) % total_teams
+    slot = pos_in_round + 1 if rnd % 2 == 1 else total_teams - pos_in_round
+    on_the_clock_roster = slot_to_roster.get(slot)
+
+    try:
+        my_roster_id = _my_roster().get("roster_id")
+    except Exception:
+        my_roster_id = None
+
+    my_picks = []
+    drafted_ids = set()
+    for p in picks:
+        drafted_ids.add(str(p.get("player_id")))
+        if p.get("roster_id") == my_roster_id:
+            pl = players.get(str(p.get("player_id")), {})
+            my_picks.append({"round": p.get("round"), "pick_no": p.get("pick_no"),
+                              "player": _pname(p.get("player_id"), players)})
+
+    # Roster needs: starting slots minus bench, compared to positions I've drafted
+    lg = _get(f"/league/{LEAGUE_ID}", ttl=3600)
+    slots = [s for s in (lg.get("roster_positions") or []) if s != "BN"]
+    need_counts: dict = {}
+    for s in slots:
+        need_counts[s] = need_counts.get(s, 0) + 1
+    have_counts: dict = {}
+    for p in picks:
+        if p.get("roster_id") == my_roster_id:
+            pos = players.get(str(p.get("player_id")), {}).get("pos")
+            if pos:
+                have_counts[pos] = have_counts.get(pos, 0) + 1
+
+    remaining_needs = []
+    for pos in ["QB", "RB", "WR", "TE", "K", "DEF"]:
+        required = need_counts.get(pos, 0) + (need_counts.get("FLEX", 0) if pos in ("RB", "WR", "TE") else 0)
+        have = have_counts.get(pos, 0)
+        if have < required:
+            remaining_needs.append(pos)
+
+    # Best available by position I still need
+    trending = _get("/players/nfl/trending/add?lookback_hours=168&limit=300", ttl=300)
+    trend_rank = {str(t["player_id"]): i for i, t in enumerate(trending or [])}
+    best_available: dict = {pos: [] for pos in remaining_needs}
+    for pid, pl in players.items():
+        pos = pl.get("pos")
+        if pos in best_available and pid not in drafted_ids:
+            best_available[pos].append((trend_rank.get(pid, 10**9), _pname(pid, players)))
+    for pos in best_available:
+        best_available[pos] = [name for _, name in sorted(best_available[pos])[:8]]
+
+    return {
+        "draft_status": draft.get("status"),
+        "current_pick_no": pick_no,
+        "current_round": rnd,
+        "on_the_clock": team_of(on_the_clock_roster),
+        "is_my_turn": on_the_clock_roster == my_roster_id,
+        "total_picks_made": len(picks),
+        "my_picks_so_far": my_picks,
+        "my_roster_needs_remaining": remaining_needs,
+        "best_available_by_need": best_available,
+    }
+
+
+@mcp.tool
+def get_draft_picks() -> list:
+    """Full list of every pick made so far in this league's draft, in order,
+    with team, round, and player."""
+    draft = _current_draft()
+    picks = _get(f"/draft/{draft['draft_id']}/picks", ttl=15) or []
+    players = _players()
+    users = _league_users()
+    roster_owner = {r["roster_id"]: r.get("owner_id") for r in _rosters()}
+
+    def team_of(rid):
+        return users.get(roster_owner.get(rid), {}).get("team_name", f"roster {rid}")
+
+    return [
+        {
+            "pick_no": p.get("pick_no"),
+            "round": p.get("round"),
+            "team": team_of(p.get("roster_id")),
+            "player": _pname(p.get("player_id"), players),
+        }
+        for p in picks
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Entrypoint
 # ---------------------------------------------------------------------------
