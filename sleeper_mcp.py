@@ -190,6 +190,9 @@ def get_league_info() -> dict:
         "waiver_type": (lg.get("settings") or {}).get("waiver_type"),
         "waiver_budget": (lg.get("settings") or {}).get("waiver_budget"),
         "trade_deadline_week": (lg.get("settings") or {}).get("trade_deadline"),
+        "waiver_day_of_week": (lg.get("settings") or {}).get("waiver_day_of_week"),
+        "waiver_clear_hour_utc": (lg.get("settings") or {}).get("waiver_clear_hour") or (lg.get("settings") or {}).get("daily_waivers_hour"),
+        "daily_waivers": bool((lg.get("settings") or {}).get("daily_waivers")),
     }
 
 
